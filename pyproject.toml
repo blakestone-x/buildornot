@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "buildornot"
-version = "0.2.0"
-description = "Should you build this side project? A Jev-powered yes/no with a confidence score."
+version = "0.3.0"
+description = "Should you build this side project? BUILD, MAYBE or DON'T BUILD, with reasons and prior art, judged by TypeSafe's Jev."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
