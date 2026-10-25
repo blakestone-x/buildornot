@@ -3,7 +3,7 @@
 Should you build this side project? One command gives you **BUILD**, **MAYBE** or **DON'T BUILD**, the reasons, and the prior art it found.
 
 ```
-$ buildornot "A command line tool that converts Markdown files to PDF" --for "developers writing docs"
+$ buildornot "A command line tool that converts Markdown files to PDF" --for "developers writing docs" --no-save
 
   DON'T BUILD  (leaning)
   score 0.31; BUILD at 0.60 or more, DON'T BUILD at 0.42 or less
@@ -55,10 +55,10 @@ Each run is saved as a new file in `~/.buildornot/runs/` (set `BUILDORNOT_HOME` 
 
 ## Reading the verdict
 
-The first line is the verdict and how strong it is: **clear**, **leaning** or **close call**. The second line is the score behind it and the lines it's measured against (BUILD at 0.60 or more, DON'T BUILD at 0.42 or less), or the deal-breaker that stopped it.
+The first line is the verdict and how strong it is. BUILD and DON'T BUILD are **clear**, **leaning** or **close call**. A MAYBE says which way it **leans** (build or don't build), or that it's **held back** from BUILD by one of the reasons below. The second line is the score behind it and the lines it's measured against (BUILD at 0.60 or more, DON'T BUILD at 0.42 or less), or the deal-breaker that stopped it.
 
 - **Deal-breakers** end it regardless of the score: solution looking for a problem, depends on access you can't get, breaks terms or privacy, useless until it has lots of users, almost no real problem, or far beyond what you can build.
-- **Holding it back from BUILD** lists what keeps a good score at MAYBE: a deal-breaker that's possible but not likely, existing tools that already cover it with no reason given to build anyway, or prior art that couldn't be checked.
+- **Holding it back from BUILD** lists what keeps a good score at MAYBE: a deal-breaker that's possible but not likely, existing tools that already cover it with no reason given to build anyway, or prior art that couldn't be fully checked (including when GitHub's rate limit stops its search).
 - **For** and **Against** show the judgments that pushed each way, with the level Jev picked out of five.
 - **Prior art** lists matches with how likely Jev thinks each one does the same job.
 

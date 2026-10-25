@@ -103,6 +103,17 @@ class DecideTests(unittest.TestCase):
         v = bon.decide(answers({**STRONG, "solved": 3.6}, benefit=0.9), [])
         self.assertEqual(v.verdict, "BUILD")
 
+    def test_partial_search_blocks_build(self) -> None:
+        v = bon.decide(answers(STRONG), [], search_status="partial")
+        self.assertEqual(v.verdict, "MAYBE")
+        self.assertTrue(any("Part of the prior-art search" in h for h in v.held_back))
+
+    def test_printed_score_never_contradicts_the_thresholds(self) -> None:
+        # These levels sum to 0.42 on paper but 0.42000000000000004 in floating point.
+        v = bon.decide(answers({"pain": 3, "frequency": 3, "audience": 0, "solved": 4, "feasible": 3, "reach": 0}), [])
+        self.assertEqual(v.composite, 0.42)
+        self.assertEqual(v.verdict, "DON'T BUILD")
+
     def test_failed_search_blocks_build(self) -> None:
         v = bon.decide(answers(STRONG), [], search_status="failed")
         self.assertEqual(v.verdict, "MAYBE")
@@ -152,9 +163,10 @@ class DecideTests(unittest.TestCase):
         held = bon.decide(answers(STRONG, deals={"blocked_access": 0.6}), [])
         self.assertEqual((held.verdict, held.strength), ("MAYBE", "held back"))
         mid = {k: 2.0 for k in bon.SCORES}
-        lean = bon.decide(answers({**mid, "pain": 2.6}), [])
-        self.assertEqual(lean.verdict, "MAYBE")
-        self.assertIn(lean.strength, ("leans build", "leans don't build"))
+        up = bon.decide(answers({**mid, "pain": 2.6}), [])  # composite 0.54, above the 0.51 middle
+        self.assertEqual((up.verdict, up.strength), ("MAYBE", "leans build"))
+        down = bon.decide(answers({**mid, "pain": 1.0}), [])  # composite 0.44, below it
+        self.assertEqual((down.verdict, down.strength), ("MAYBE", "leans don't build"))
 
     def test_strength_words(self) -> None:
         self.assertEqual(bon.strength_of(0.6), "clear")
@@ -181,6 +193,11 @@ class SearchTermTests(unittest.TestCase):
 
     def test_capitalized_acronyms_survive(self) -> None:
         self.assertIn("qa", bon.candidate_terms("A tool for AI PR QA in Go and C"))
+
+    def test_language_names_with_symbols_survive(self) -> None:
+        terms = bon.candidate_terms("A refactoring helper for C# and C++ codebases")
+        self.assertIn("c#", terms)
+        self.assertIn("c++", terms)
 
     def test_picks_two_strongest_terms_without_repeating_a_word(self) -> None:
         idea = "Convert markdown notes into printable PDF booklets"
@@ -266,11 +283,12 @@ class PriorArtTests(unittest.TestCase):
         self.assertEqual(bon.find_prior_art([], []), ([], "not run"))
 
     def test_duplicates_are_merged_and_capped(self) -> None:
-        many = [repo(i, f"o/r{i}") for i in range(10)]
-        with mock.patch.object(bon, "search_github", return_value=many), \
-                mock.patch.object(bon, "search_hn", return_value=many[:4]):
+        by_query = {"a": [repo(i, f"o/r{i}") for i in range(10)], "b": [repo(i, f"o/s{i}") for i in range(10)]}
+        with mock.patch.object(bon, "search_github", side_effect=lambda q, limit: by_query[q]), \
+                mock.patch.object(bon, "search_hn", side_effect=lambda q, limit: by_query[q][:4]):
             found, _ = bon.find_prior_art(["a", "b"], [])
-        self.assertEqual(len(found), 10)
+        self.assertEqual(len(found), 12)  # 20 unique results, capped at 12
+        self.assertEqual(len({c.url for c in found}), 12)
 
     def test_private_and_malformed_github_results_are_dropped(self) -> None:
         body = {"items": [
@@ -462,6 +480,23 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn("Holding it back", bon.report_text(self.record(), crowded, None))
         held = bon.decide(answers(STRONG, deals={"blocked_access": 0.6}), [])
         self.assertIn("Holding it back", bon.report_markdown(self.record(), held))
+
+    def test_closed_pipe_does_not_crash(self) -> None:
+        class ClosedPipe(io.StringIO):
+            def write(self, s: str) -> int:
+                raise BrokenPipeError
+
+        verdict = bon.decide(answers(), [])
+        record = {**self.record(), "outcome": None}
+        real_stdout = sys.stdout
+        try:
+            with mock.patch.object(bon, "run", return_value=(verdict, record)), \
+                    mock.patch.object(bon, "save_run", return_value=None):
+                sys.stdout = ClosedPipe()
+                code = bon.main(["an idea long enough to judge", "--json", "--no-save"])
+        finally:
+            sys.stdout = real_stdout
+        self.assertEqual(code, 0)
 
     def test_main_prints_errors_and_exits_1(self) -> None:
         err = io.StringIO()

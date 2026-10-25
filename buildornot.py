@@ -294,9 +294,10 @@ def candidate_terms(idea: str, limit: int = 20) -> list[str]:
 
     Acronyms written in capitals (AI, PR, QA) are kept even when short.
     """
-    acronyms = {w.lower() for w in re.findall(r"\b[A-Z][A-Z0-9+#]{1,5}\b", idea)}
+    acronyms = {w.lower() for w in re.findall(r"\b[A-Z][A-Z0-9+#]{1,5}(?![A-Za-z0-9])", idea)}
     words = words_of(idea)
-    keep = [w not in STOPWORDS and (len(w) >= 3 or w in acronyms) for w in words]
+    # Short words survive when they're capitalized acronyms or language names like C# and C++.
+    keep = [w not in STOPWORDS and (len(w) >= 3 or w in acronyms or any(ch in w for ch in "+#")) for w in words]
     singles = list(dict.fromkeys(w for w, k in zip(words, keep) if k))
     pairs = list(dict.fromkeys(f"{a} {b}" for (a, ka), (b, kb) in zip(zip(words, keep), zip(words[1:], keep[1:]))
                                if ka and kb and a != b))
@@ -491,8 +492,9 @@ def decide(answers: Json, candidates: list[Candidate], search_status: SearchStat
                          key=lambda c: -c.traction)
     if established:  # one penalty: several URLs for one product shouldn't count several times
         composite -= OVERLAP_PENALTY
+    composite = round(composite, 2)  # the same number decides and is printed, so they never disagree
 
-    odds = {k: float(answers[f"deal_{k}"]["noul"]) for k in DEALBREAKERS}
+    odds ={k: float(answers[f"deal_{k}"]["noul"]) for k in DEALBREAKERS}
     breakers: list[tuple[str, float]] = [(DEALBREAKER_LABELS[k], (p - DEALBREAKER_AT) / (1 - DEALBREAKER_AT))
                                         for k, p in odds.items() if p >= DEALBREAKER_AT]
     breakers += [(label, (dims[k]["bottom"] - FLOOR_AT) / (1 - FLOOR_AT))
@@ -506,6 +508,8 @@ def decide(answers: Json, candidates: list[Candidate], search_status: SearchStat
         held_back.append("Existing tools already cover this and no reason to build it anyway was given")
     if search_status in ("failed", "not run"):
         held_back.append("Prior art wasn't checked, so 'already solved' is a guess")
+    elif search_status == "partial":
+        held_back.append("Part of the prior-art search failed, so 'already solved' may be missing matches")
 
     verdict: VerdictName
     if breakers:
@@ -697,12 +701,16 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     saved = None if args.no_save else save_run(record)
 
-    if args.json:
-        print(json.dumps(record, indent=2))
-    elif args.md:
-        print(report_markdown(record, verdict))
-    else:
-        print(report_text(record, verdict, saved))
+    try:
+        if args.json:
+            print(json.dumps(record, indent=2))
+        elif args.md:
+            print(report_markdown(record, verdict))
+        else:
+            print(report_text(record, verdict, saved))
+        sys.stdout.flush()
+    except BrokenPipeError:  # output piped into something that closed early, like `head`
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
     return 0
 
 
