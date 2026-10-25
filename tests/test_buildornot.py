@@ -113,14 +113,16 @@ class SearchTermTests(unittest.TestCase):
         odds.update({"markdown": 0.9, "markdown notes": 0.85, "pdf": 0.8})
         fake = {"answers": {f"term_{n}": {"noul": odds[t]} for n, t in enumerate(terms)}}
         with mock.patch.object(bon, "ask_jev", return_value=fake):
-            queries = bon.pick_search_terms(idea, [])
+            queries, raw = bon.pick_search_terms(idea, [])
         self.assertEqual(queries, ["markdown pdf", "markdown"])
+        self.assertIs(raw, fake)
 
     def test_falls_back_to_keywords_when_jev_fails(self) -> None:
         notes: list[str] = []
         with mock.patch.object(bon, "ask_jev", side_effect=bon.BuildOrNotError("down")):
-            queries = bon.pick_search_terms("Convert markdown notes into printable PDF booklets", notes)
+            queries, raw = bon.pick_search_terms("Convert markdown notes into printable PDF booklets", notes)
         self.assertEqual(len(queries), 1)
+        self.assertIsNone(raw)
         self.assertIn("plain keywords", notes[0])
 
 
@@ -223,3 +225,94 @@ class KeyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Regressions for the pre-launch review findings."""
+
+    def setUp(self) -> None:
+        sleep = mock.patch.object(bon.time, "sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def test_non_json_body_is_an_http_error(self) -> None:
+        with mock.patch.object(bon.urllib.request, "urlopen", return_value=FakeResponse(b"<html>502</html>")):
+            with self.assertRaisesRegex(bon.HttpError, "wasn't JSON"):
+                bon.request_json("https://example.test/x")
+
+    def test_dropped_connection_is_retried_then_an_http_error(self) -> None:
+        import http.client
+        with mock.patch.object(bon.urllib.request, "urlopen",
+                               side_effect=http.client.RemoteDisconnected("closed")) as opened:
+            with self.assertRaises(bon.HttpError):
+                bon.request_json("https://example.test/x", retries=2)
+        self.assertEqual(opened.call_count, 3)
+
+    def test_connection_reset_during_search_is_a_note_not_a_crash(self) -> None:
+        notes: list[str] = []
+        with mock.patch.object(bon.urllib.request, "urlopen", side_effect=ConnectionResetError("reset")):
+            found = bon.find_prior_art(["markdown pdf"], notes)
+        self.assertEqual(found, [])
+        self.assertEqual(len(notes), 2)  # GitHub and Hacker News both noted
+
+    def test_auth_header_is_kept_off_redirects(self) -> None:
+        seen: list[Any] = []
+
+        def capture(req: Any, timeout: float) -> FakeResponse:
+            seen.append(req)
+            return FakeResponse(b'{"answers": {}}')
+
+        with mock.patch.object(bon.urllib.request, "urlopen", side_effect=capture):
+            bon.request_json("https://example.test/x", body={"a": 1}, auth="Bearer secret")
+        req = seen[0]
+        self.assertEqual(req.unredirected_hdrs.get("Authorization"), "Bearer secret")
+        self.assertNotIn("Authorization", req.headers)
+
+    def test_jev_response_without_answers_is_a_clean_error(self) -> None:
+        with mock.patch.object(bon, "request_json", return_value={"error": "overloaded"}), \
+                mock.patch.object(bon, "api_key", return_value="k"):
+            with self.assertRaisesRegex(bon.BuildOrNotError, "no answers"):
+                bon.ask_jev({}, {})
+
+    def test_partial_term_answers_fall_back_to_keywords(self) -> None:
+        notes: list[str] = []
+        with mock.patch.object(bon, "ask_jev", return_value={"answers": {"term_0": {"noul": None}}}):
+            queries, raw = bon.pick_search_terms("Convert markdown notes into printable PDF booklets", notes)
+        self.assertTrue(queries[0])
+        self.assertIsNone(raw)
+        self.assertIn("plain keywords", notes[0])
+
+    def test_idea_of_common_words_still_gets_searched(self) -> None:
+        idea = "An app that helps people track things they want to build"
+        self.assertEqual(bon.candidate_terms(idea), [])
+        queries, _ = bon.pick_search_terms(idea, [])
+        self.assertTrue(queries and queries[0])
+
+    def test_no_search_is_reported_honestly(self) -> None:
+        with mock.patch.object(bon, "pick_search_terms", return_value=([], None)), \
+                mock.patch.object(bon, "ask_jev", return_value={"answers": answers()}):
+            _, record = bon.run("An idea whose words yield nothing searchable at all")
+        self.assertEqual(record["request"]["state"]["prior_art"], "unknown: no search was run")
+        self.assertTrue(any("wasn't checked" in n for n in record["notes"]))
+
+    def test_non_ascii_ideas_have_words(self) -> None:
+        self.assertIn("planificateur", bon.words_of("Un planificateur de repas pour étudiants"))
+        self.assertIn("étudiants", bon.words_of("Un planificateur de repas pour étudiants"))
+
+    def test_saving_twice_never_overwrites(self) -> None:
+        record = {"request": {"state": {"idea": "same"}}, "outcome": None}
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(bon, "HOME", Path(home)):
+            first = bon.save_run(record)
+            assert first is not None
+            first.write_text('{"outcome": "shipped"}', encoding="utf-8")
+            second = bon.save_run(record)
+            self.assertNotEqual(first, second)
+            self.assertIn("shipped", first.read_text(encoding="utf-8"))

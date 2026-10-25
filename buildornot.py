@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -153,14 +154,20 @@ STOPWORDS = set(
 
 
 def request_json(url: str, *, body: Json | None = None, headers: dict[str, str] | None = None,
-                 timeout: float = 20, retries: int = 2) -> Json:
-    """GET or POST JSON, retrying rate limits and server errors with backoff."""
+                 auth: str | None = None, timeout: float = 20, retries: int = 2) -> Json:
+    """GET or POST JSON, retrying rate limits, server errors and dropped connections with backoff.
+
+    Every failure, including a non-JSON body, comes out as HttpError. `auth` is an
+    Authorization value kept off redirects, so a 30x can't carry the key to another host.
+    """
     data = json.dumps(body).encode() if body is not None else None
     all_headers = {"User-Agent": USER_AGENT, **(headers or {})}
     if data is not None:
         all_headers["Content-Type"] = "application/json"
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=all_headers, method="POST" if data else "GET")
+        if auth:
+            req.add_unredirected_header("Authorization", auth)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 return json.load(response)
@@ -170,11 +177,13 @@ def request_json(url: str, *, body: Json | None = None, headers: dict[str, str] 
                 continue
             detail = exc.read().decode(errors="replace")[:300]
             raise HttpError(exc.code, detail) from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except ValueError as exc:  # a 200 that isn't JSON: proxy page, captive portal, outage page
+            raise HttpError(0, "the response wasn't JSON") from exc
+        except (OSError, http.client.HTTPException) as exc:  # URLError, timeouts, resets, dropped connections
             if attempt < retries:
                 time.sleep(1.5 * (attempt + 1))
                 continue
-            raise HttpError(0, str(getattr(exc, "reason", exc))) from exc
+            raise HttpError(0, str(getattr(exc, "reason", None) or exc or type(exc).__name__)) from exc
     raise HttpError(0, "no response")
 
 
@@ -204,12 +213,15 @@ def api_key() -> str:
 
 def ask_jev(state: Json, questions: Json) -> Json:
     try:
-        return request_json(API_URL, body={"model": MODEL, "state": state, "questions": questions},
-                            headers={"Authorization": f"Bearer {api_key()}"}, timeout=90)
+        response = request_json(API_URL, body={"model": MODEL, "state": state, "questions": questions},
+                                auth=f"Bearer {api_key()}", timeout=90)
     except HttpError as exc:
         if exc.status in (401, 403):
             raise BuildOrNotError("TypeSafe rejected the API key. Check TYPESAFE_API_KEY.") from exc
         raise BuildOrNotError(f"Jev request failed: {exc}") from exc
+    if not isinstance(response.get("answers"), dict):
+        raise BuildOrNotError(f"Jev returned no answers: {json.dumps(response)[:200]}")
+    return response
 
 
 # ---------------------------------------------------------------- prior art
@@ -235,7 +247,7 @@ class Candidate:
 
 
 def words_of(text: str) -> list[str]:
-    return [w.strip(".-") for w in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]{1,}", text.lower())]
+    return [w.strip(".-") for w in re.findall(r"[^\W\d_][\w+#.-]+", text.lower())]
 
 
 def keywords(text: str, limit: int = 6) -> list[str]:
@@ -262,11 +274,17 @@ def candidate_terms(idea: str, limit: int = 16) -> list[str]:
     return terms[:limit]
 
 
-def pick_search_terms(idea: str, notes: list[str]) -> list[str]:
+def fallback_terms(idea: str) -> list[str]:
+    """For ideas made only of common words: the longest words, skipping the shortest fillers."""
+    words = list(dict.fromkeys(w for w in words_of(idea) if len(w) >= 4))
+    return [" ".join(sorted(words, key=len, reverse=True)[:3])] if words else []
+
+
+def pick_search_terms(idea: str, notes: list[str]) -> tuple[list[str], Json | None]:
     """Select, don't generate: Jev rates each candidate term, code builds the queries."""
     terms = candidate_terms(idea)
     if len(terms) < 2:
-        return [" ".join(terms)] if terms else []
+        return ([" ".join(terms)] if terms else fallback_terms(idea)), None
     questions = {
         f"term_{n}": {
             "type": "noul",
@@ -279,11 +297,12 @@ def pick_search_terms(idea: str, notes: list[str]) -> list[str]:
         for n, term in enumerate(terms)
     }
     try:
-        answers = ask_jev({"idea": idea}, questions)["answers"]
-    except BuildOrNotError as exc:
+        response = ask_jev({"idea": idea}, questions)
+        odds = {t: float(response["answers"][f"term_{n}"]["noul"]) for n, t in enumerate(terms)}
+    except (BuildOrNotError, KeyError, TypeError, ValueError) as exc:
         notes.append(f"picking search terms failed, used plain keywords ({exc})")
-        return [" ".join(keywords(idea)[:3])]
-    ranked = sorted(terms, key=lambda t: -answers[f"term_{terms.index(t)}"]["noul"])
+        return [" ".join(keywords(idea)[:3]) or " ".join(terms[:2])], None
+    ranked = sorted(terms, key=lambda t: -odds[t])
     best: list[str] = []
     for term in ranked:  # the two strongest terms that don't repeat a word
         if not any(set(term.split()) & set(b.split()) for b in best):
@@ -291,18 +310,17 @@ def pick_search_terms(idea: str, notes: list[str]) -> list[str]:
         if len(best) == 2:
             break
     queries = [" ".join(best), ranked[0]]
-    return list(dict.fromkeys(q for q in queries if q))
+    return list(dict.fromkeys(q for q in queries if q)), response
 
 
 def search_github(query: str, limit: int) -> list[Candidate]:
     headers = {"Accept": "application/vnd.github+json"}
-    if token := os.environ.get("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {token}"
+    token = os.environ.get("GITHUB_TOKEN")
     url = "https://api.github.com/search/repositories?" + urllib.parse.urlencode(
         # Name and description only, in best-match order: sorting by stars surfaces keyword-stuffed spam.
         {"q": f"{query} in:name,description", "per_page": limit}
     )
-    items = request_json(url, headers=headers, retries=0).get("items", [])
+    items = request_json(url, headers=headers, auth=f"Bearer {token}" if token else None, retries=0).get("items", [])
     return [
         Candidate("github", i["full_name"], i["html_url"], i.get("description") or "", i.get("stargazers_count", 0),
                   (i.get("pushed_at") or "")[:10])
@@ -331,6 +349,7 @@ def find_prior_art(queries: list[str], notes: list[str]) -> list[Candidate]:
                 for c in search(q, limit):
                     found.setdefault(c.url, c)
             except HttpError as exc:  # a failed search lowers coverage; it doesn't stop the verdict
+                # (request_json turns every network and body failure into HttpError)
                 hint = " (set GITHUB_TOKEN to raise the rate limit)" if exc.status in (403, 429) else ""
                 notes.append(f"{name} search for '{q}' failed: {exc}{hint}")
     return list(found.values())[:12]
@@ -339,7 +358,8 @@ def find_prior_art(queries: list[str], notes: list[str]) -> list[Candidate]:
 # ---------------------------------------------------------------- the judgment request
 
 
-def build_request(idea: str, for_whom: str, builder: str, candidates: list[Candidate]) -> tuple[Json, Json]:
+def build_request(idea: str, for_whom: str, builder: str, candidates: list[Candidate],
+                  searched: bool = True) -> tuple[Json, Json]:
     questions: Json = {}
     for key, spec in SCORES.items():
         questions[key] = {"type": "score", "instructions": spec["instructions"], "criteria": spec["criteria"]}
@@ -362,7 +382,8 @@ def build_request(idea: str, for_whom: str, builder: str, candidates: list[Candi
         "idea": idea,
         "for_whom": for_whom or "not stated",
         "builder": builder or "",
-        "prior_art": [c.for_jev() for c in candidates] or "no prior art was found by search",
+        "prior_art": [c.for_jev() for c in candidates] or (
+            "no prior art was found by search" if searched else "unknown: no search was run"),
     }
     return state, questions
 
@@ -484,9 +505,15 @@ def run(idea: str, for_whom: str = "", builder: str = "", search: str | None = N
     if len(idea) > MAX_IDEA_CHARS:
         idea = idea[:MAX_IDEA_CHARS]
         notes.append(f"idea cut to its first {MAX_IDEA_CHARS} characters")
-    queries = [search] if search else pick_search_terms(idea, notes)
+    term_response: Json | None = None
+    if search:
+        queries = [search]
+    else:
+        queries, term_response = pick_search_terms(idea, notes)
+    if not queries:
+        notes.append("couldn't find search terms in the idea, so prior art wasn't checked; try --search")
     candidates = find_prior_art(queries, notes)
-    state, questions = build_request(idea, for_whom, builder, candidates)
+    state, questions = build_request(idea, for_whom, builder, candidates, searched=bool(queries))
     response = ask_jev(state, questions)
     try:
         verdict = decide(response["answers"], candidates)
@@ -495,6 +522,7 @@ def run(idea: str, for_whom: str = "", builder: str = "", search: str | None = N
     record: Json = {
         "version": __version__, "model": response.get("model"), "queries": queries, "notes": notes,
         "request": {"state": state, "questions": questions}, "response": response,
+        "search_term_response": term_response,
         "verdict": verdict.verdict, "confidence": verdict.confidence, "composite": verdict.composite,
         "outcome": None,  # fill in later (shipped? used? abandoned?) to calibrate
     }
@@ -502,13 +530,21 @@ def run(idea: str, for_whom: str = "", builder: str = "", search: str | None = N
 
 
 def save_run(record: Json) -> Path | None:
-    run_id = hashlib.sha256(json.dumps(record["request"], sort_keys=True).encode()).hexdigest()[:12]
+    """Write a new file per run; never overwrite, since a saved run may hold a filled-in outcome."""
+    digest = hashlib.sha256(json.dumps(record["request"], sort_keys=True).encode()).hexdigest()[:8]
     try:
         runs = HOME / "runs"
         runs.mkdir(parents=True, exist_ok=True)
-        path = runs / f"{run_id}.json"
-        path.write_text(json.dumps(record, indent=2), encoding="utf-8")
-        return path
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        for n in range(100):
+            path = runs / f"{stamp}-{digest}{f'-{n}' if n else ''}.json"
+            try:
+                with path.open("x", encoding="utf-8") as f:
+                    f.write(json.dumps(record, indent=2))
+                return path
+            except FileExistsError:
+                continue
+        return None
     except OSError:
         return None  # saving is a convenience; never fail the verdict over it
 

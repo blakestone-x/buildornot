@@ -7,16 +7,21 @@ $ buildornot "A command line tool that converts Markdown files to PDF" --for "de
 
   DON'T BUILD  (59% confidence)
 
+  A command line tool that converts Markdown files to PDF
+
   For:
     + Whether you can build it: Clearly doable; the hard parts are known techniques
   Against:
     - Already exists: alanshaw/markdown-pdf (2880 stars)
     - Whether you can reach the people it's for: No channel is apparent
     - How well it's already solved: Popular, mature tools already do exactly this
+    - How clearly you can name who it's for: A recognizable group with a shared situation
 
   Prior art (12 checked):
-    87% overlap  alanshaw/markdown-pdf (2880 stars)  https://github.com/alanshaw/markdown-pdf
-    81% overlap  Show HN: CLI to export Markdown to PDF using Jinja2 templates (8 points)
+    86% overlap  alanshaw/markdown-pdf (2880 stars)  https://github.com/alanshaw/markdown-pdf
+    78% overlap  Show HN: CLI to export Markdown to PDF using Jinja2 templates (8 points)  https://github.com/andy-verstraeten/mdexport
+
+  3625 input tokens. Confidence isn't calibrated against real outcomes yet.
 ```
 
 ## Install
@@ -41,7 +46,7 @@ buildornot "your idea, in a sentence or two" --for "who it's for" --builder "you
 | `--for` | Who it's for and the use case. Drives the audience and reach judgments. |
 | `--builder` | Your skills, time and any audience you already have. Drives whether you can ship it. |
 | `--md` | Short Markdown report, ready to paste into Discord (links won't unfurl). |
-| `--json` | Everything, including every raw Jev answer. |
+| `--json` | Everything, including every raw Jev answer (the search-term ratings and the judgment). |
 | `--search` | Your own prior-art search terms, when the automatic ones miss. |
 | `--no-save` | Don't keep a copy of the run. |
 
@@ -63,7 +68,7 @@ A run costs a few thousand Jev input tokens, well under a cent.
 
 Right now, confidence says how far past the line the idea landed and how settled Jev's answers were. It is **not** yet the probability that the project works out: the weights are informed guesses, not fit to outcomes.
 
-Every run is saved in `~/.buildornot/runs/` with an empty `outcome` field. Once there are enough ideas with known outcomes (Show HN posts and their traction, repos still active a year later), the Jev answers become features for a small model, the weights get fit to what actually happened, and the confidence becomes calibrated. TypeSafe's [autoresearch feature discovery](https://docs.typesafe.ai/cookbooks/autoresearch_feature_discovery) cookbook shows the pattern.
+Every run is saved as a new file in `~/.buildornot/runs/` (never overwritten) with an empty `outcome` field. Once there are enough ideas with known outcomes (Show HN posts and their traction, repos still active a year later), the Jev answers become features for a small model, the weights get fit to what actually happened, and the confidence becomes calibrated. TypeSafe's [autoresearch feature discovery](https://docs.typesafe.ai/cookbooks/autoresearch_feature_discovery) cookbook shows the pattern.
 
 ## Development
 
