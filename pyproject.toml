@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buildornot"
+version = "0.2.0"
+description = "Should you build this side project? A Jev-powered yes/no with a confidence score."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+]
+
+[project.scripts]
+buildornot = "buildornot:main"
+
+[project.urls]
+Homepage = "https://github.com/blakestone-x/buildornot"
+
+[tool.setuptools]
+py-modules = ["buildornot"]

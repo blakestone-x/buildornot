@@ -1,3 +1,6 @@
 .env
 runs/
 __pycache__/
+build/
+*.egg-info/
+evals/results/
